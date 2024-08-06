@@ -5,7 +5,8 @@ import torch
 
 class MaxPoolSpatial2D(nn.Module):
     def __init__(self, ksize, stride=None, pad=0):
-        self.kszie = ksize
+        super().__init__()
+        self.ksize = ksize
         self.stride = stride
         self.pad = pad
 

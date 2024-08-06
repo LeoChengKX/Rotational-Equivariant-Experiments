@@ -1,3 +1,6 @@
+"""
+Learn only P4ConvP4. 
+"""
 import os
 os.environ["WANDB_API_KEY"] = '05f974a64215c03b7fc204d65f79b91c1bb3e369'
 
@@ -19,7 +22,7 @@ from matplotlib import pyplot as plt
 from gcov2d_for_learn import *
 
 cfg = ConfigDict()
-cfg.name = 'mlp2gcnn'
+cfg.name = 'mlp2gcnn_P4'
 cfg.root_dir = "/project/a/aspuru/chengl43/rot_equiv_exp"
 cfg.log_dir = f"{cfg.root_dir}/logs/"
 # cfg.seed = 42 
@@ -46,10 +49,6 @@ def prepare_dataset():
     test_split = MNIST("dataset", train=False, transform=ToTensor())
     train_loader = DataLoader(train_split, batch_size=cfg.bs, shuffle=True)
     test_loader = DataLoader(test_split, batch_size=cfg.bs, shuffle=True)
-    # train_split.train_data.to(torch.device("cuda:0"))
-    # test_split.train_data.to(torch.device("cuda:0"))
-    # train_split.train_labels.to(torch.device("cuda:0"))
-    # test_split.train_labels.to(torch.device("cuda:0"))
     return train_loader, test_loader
 
 
@@ -90,8 +89,8 @@ def cnn_dim_out(in_size, ker, stride, padding):
 class MLP(nn.Module):
     def __init__(self, cfg):
         super(MLP, self).__init__()
-        in_dim, out_dim, hidden_dim, blocks, layers, block_out_dim, merge_dim = (
-            cfg.in_dim, cfg.out_dim, cfg.hidden_dim, cfg.blocks, cfg.layers, cfg.block_output_dim, cfg.merge_dim
+        in_dim, out_dim, hidden_dim, blocks, layers, block_out_dim, merge_dim, activation = (
+            cfg.in_dim, cfg.out_dim, cfg.hidden_dim, cfg.blocks, cfg.layers, cfg.block_output_dim, cfg.merge_dim, cfg.activation
         )
         self.in_dim = in_dim
         self.out_dim = out_dim
@@ -100,6 +99,7 @@ class MLP(nn.Module):
         self.layers = layers
         self.block_out_dim = block_out_dim
         self.merge_dim = merge_dim
+        self.activation = activation
 
         self.MLP_blocks = nn.ModuleList()
         self.f_out = nn.ModuleList()
@@ -114,12 +114,11 @@ class MLP(nn.Module):
         img = img.flatten(start_dim=1)
         cparams = cparams.flatten()
         ks = cparams.shape[-1]
-        # if cfg.activation == 0:
-        #     MLP_result = [self.MLP_blocks[i](img) for i in range(self.blocks)]
-        # else:
-        #     MLP_result = [self.act_fn(self.MLP_blocks[i](img)) for i in range(self.blocks)]
-        # result = []
-        MLP_result = [self.MLP_blocks[i](img) for i in range(self.blocks)]
+        if self.activation == 0:
+            MLP_result = [self.MLP_blocks[i](img) for i in range(self.blocks)]
+        else:
+            MLP_result = [self.act_fn(self.MLP_blocks[i](img)) for i in range(self.blocks)]
+        result = []
 
         h = cparams.view(cfg.kernel_size ** 2, 1) * self.mtx1 # Same shape as mtx1
         h = h.flatten()
@@ -162,7 +161,7 @@ class MLP_block(nn.Module):
                 x = layer(x)
             return x
 
-class fakeGCNN(nn.Module):
+class fakeCNN(nn.Module):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
@@ -170,23 +169,30 @@ class fakeGCNN(nn.Module):
         self.model = MLP(cfg)
         self.loss_rc = nn.MSELoss()
         self.loss_kl = nn.KLDivLoss(reduction="batchmean", log_target=True)
-        self.cparams_transform = nn.ParameterList([
-            nn.Parameter(torch.rand(cfg.kernel_size ** 2, cfg.kernel_size ** 2)).cuda() for _ in range(4)])
+        # self.cparams_transform_1 = nn.ParameterList([
+        #     nn.Parameter(torch.rand(cfg.kernel_size ** 2, cfg.kernel_size ** 2)).cuda() for _ in range(4)])
+        # self.cparams_transform_2 = nn.ParameterList([
+        #     nn.Parameter(torch.rand(cfg.kernel_size ** 2, cfg.kernel_size ** 2)).cuda() for _ in range(4)])
+        # self.cparams_mtx_up = nn.ParameterList([nn.Parameter(torch.rand(cfg.kernel_size ** 2, cfg.emb_dim)) for _ in range(4)])
+        # self.cparams_mtxs_down = nn.ParameterList([nn.Parameter(torch.rand(cfg.kernel_size ** 2 * cfg.emb_dim, 
+        #                                                                   cfg.kernel_size ** 2)) for _ in range(4)])
+        self.cparams_transform = nn.ParameterList([nn.Parameter(torch.rand(4, cfg.kernel_size ** 2, cfg.kernel_size ** 2)) for _ in range(16)])
 
     def train_step(self, dataloader):
         ks = self.cfg.kernel_size
         img_dim = self.cfg.img_dim
         
         loss = 0
-        conv = P4ConvZ2()
+        conv = P4ConvP4()
         conv_bs = 128
         for _ in range(conv_bs):
-            cparams = torch.randn(ks**2).cuda()
-            conv.weight = nn.Parameter(cparams.view(1,1,1,ks,ks), requires_grad=False) # cnn weight
+            cparams = torch.randn(4 * ks**2).cuda()
+            conv.weight = nn.Parameter(cparams.view(1,1,4,ks,ks), requires_grad=False) # cnn weight
 
+            # Prepare dataset
             if cfg.dataset == 0:
                 img_bs = cfg.bs
-                img = torch.randn(img_bs,1,img_dim,img_dim).cuda()
+                img = torch.randn(img_bs,4,img_dim,img_dim).cuda()
             else:
                 img, _ = next(iter(dataloader))
                 img = torch.Tensor(img).cuda()
@@ -194,12 +200,37 @@ class fakeGCNN(nn.Module):
             cnn_out = conv(img)  # bs, 4, cnn_out_dim, cnn_out_dim
 
             # Architecture
-            mlp_out = []
-            for i in range(4):
-                cp = self.cparams_transform[i] @ cparams
-                mlp_out.append(self.model(img.view(cfg.bs,-1), cp))
-            mlp_out = torch.stack(mlp_out).transpose(0, 1)
+            if cfg.provide_filter == 0:
+                cp = []
+                for i in range(16): 
+                    cp.append(torch.sum(torch.einsum("bij,bj->bi", self.cparams_transform[i], cparams.view(4, ks ** 2)), axis=0))
+                cp = torch.stack(cp).view(4, 4, ks ** 2)
+                mlp_out = []
+                for i in range(4):
+                    layer_out = []
+                    for j in range(4):
+                        img_in = img.transpose(0, 1)[j].view(img_bs, -1)
+                        layer_out.append(self.model(img_in, cp[i][j]))
+                    mlp_out.append(sum(layer_out))
+                mlp_out = torch.stack(mlp_out).transpose(0, 1)
             
+            elif cfg.provide_filter == 1:
+                # Test converging using provided filter
+                mlp_out = []
+                tw = trans_filter(cparams.view(1,1,4,ks,ks), self.make_transformation_indices())
+                tw_shape = (4, 4, 3, 3)
+                tw = tw.view(tw_shape)
+                for i in range(4):
+                    layer_out = []
+                    for j in range(4):
+                        cp = tw[i][j]
+                        img_in = img.transpose(0, 1)[j].view(img_bs, -1)
+                        layer_out.append(self.model(img_in, cp))
+                    mlp_out.append(sum(layer_out))
+                mlp_out = torch.stack(mlp_out).transpose(0, 1)
+
+            # -------------------------------------------
+
             if cfg.loss_type == 0: # kl loss
                 loss += self.loss_kl(
                     F.log_softmax(mlp_out.flatten(start_dim=1), dim=1),
@@ -214,6 +245,12 @@ class fakeGCNN(nn.Module):
                 )
                 loss += self.loss_rc(mlp_out.flatten(start_dim=1), cnn_out.flatten(start_dim=1)).mean()
         return loss/conv_bs
+
+    def transform_cparms(cparams):
+        pass
+
+    def make_transformation_indices(self):
+        return make_indices_functions[(4, 4)](cfg.kernel_size)
     
     def visualization(self, dataloader):
         ks = self.cfg.kernel_size
@@ -249,51 +286,37 @@ class fakeGCNN(nn.Module):
         plt.subplots_adjust(left=0.05, right=0.8, wspace=0.2)
         return f
     
-    def result_visualization(self, img, cparams):
-        ks = self.cfg.kernel_size
-        img_dim = self.cfg.img_dim
-        stride = self.cfg.stride
-        
-        # Conv Output
-        conv = P4ConvZ2()
-        conv.weight = nn.Parameter(cparams.reshape(1,1,1,ks,ks),requires_grad=False) # cnn weight
-            
-        cnn_out = conv(img).squeeze().detach().cpu().numpy()
-
-        # MLP Output
-        reshape_size = cnn_dim_out(img_dim, ks, stride, 0)
-        mlp_out = []
-        for i in range(4):
-            cp = self.cparams_transform[i] @ cparams
-            mlp_out.append(self.model(img.view(1,-1), cp))
-        mlp_out = torch.stack(mlp_out)
-        vmin = min(cnn_out.min(), mlp_out.min())
-        vmax = max(cnn_out.max(), mlp_out.max())
-
-        f, axarr = plt.subplots(2,4, figsize=(16, 8))
-        for i in range(4):
-            axarr[0, i].imshow(cnn_out[i], vmin=vmin, vmax=vmax, cmap='gray')
-            axarr[0, i].axis(False)
-        
-        for i in range(4):
-            axarr[1, i].imshow(mlp_out[i].reshape(reshape_size, reshape_size).detach().cpu().numpy(), vmin=vmin, vmax=vmax, cmap='gray')
-            axarr[1, i].axis(False)
-
-        plt.subplots_adjust(left=0.05, right=0.8, wspace=0.2)
-        return f
-    
     def forward(self, img, cparams):
         """Used for visualization solely. """
-        ks = self.cfg.kernel_size
-        img_dim = self.cfg.img_dim
-        stride = self.cfg.stride
-        reshape_size = cnn_dim_out(img_dim, ks, stride, 0)
+        ks = 3
+        if self.cfg.provide_filter == 0:
+            mlp_out = []
+            for i in range(4):
+                cp = cparams.view(4, ks ** 2)[i].view(ks ** 2, 1) * self.cparams_mtx_up
+                cp = cp.flatten()
+                cp = cp @ self.cparams_mtxs_down[i]
+                layer_out = []
+                for j in range(4):
+                    img_in = img.transpose(0, 1)[j].view(1, -1)
+                    layer_out.append(self.model(img_in, cp))
+                mlp_out.append(sum(layer_out))
+            mlp_out = torch.stack(mlp_out).transpose(0, 1)
+        
+        elif self.cfg.provide_filter == 1:
+            # Test converging using provided filter
+            mlp_out = []
+            tw = trans_filter(cparams.view(1,1,4,ks,ks), self.make_transformation_indices())
+            tw_shape = (4, 4, 3, 3)
+            tw = tw.view(tw_shape)
+            for i in range(4):
+                layer_out = []
+                for j in range(4):
+                    cp = tw[i][j]
+                    img_in = img.transpose(0, 1)[j].view(img.shape[0], -1)
+                    layer_out.append(self.model(img_in, cp))
+                mlp_out.append(sum(layer_out))
+            mlp_out = torch.stack(mlp_out).transpose(0, 1)
 
-        mlp_out = []
-        for i in range(4):
-            cp = self.cparams_transform[i] @ cparams
-            mlp_out.append(self.model(img.view(img.shape[0],-1), cp).reshape(img.shape[0], reshape_size, reshape_size))
-        mlp_out = torch.stack(mlp_out).transpose(0, 1)
         return mlp_out
 
 
@@ -303,7 +326,7 @@ if __name__ == "__main__":
     parser.add_argument("--activation", type=int, default=0)
     parser.add_argument("--loss_type", type=int, default=1)
     parser.add_argument("--bs", type=int, default=1000) # 5000
-    parser.add_argument("--lr", type=float, default=1e-2)
+    parser.add_argument("--lr", type=float, default=5e-3)
     parser.add_argument("--ss_gamma", type=float)
     parser.add_argument("--blocks", type=int, default=9)
     parser.add_argument("--layers", type=int, default=1)
@@ -311,12 +334,14 @@ if __name__ == "__main__":
     parser.add_argument("--hidden_dim", type=int, default=64) # Hidden dimension
     parser.add_argument("--block_output_dim", type=int, default=64) # MLP Block out dimension
     parser.add_argument("--img_dim", type=int, default=10)
-    parser.add_argument("--merge_dim", type=int, default=10) # determine the dimension of the embbeding space
+    parser.add_argument("--merge_dim", type=int, default=10) # determine the dimension of the embbeding space for merging blocks
+    parser.add_argument("--emb_dim", type=int, default=20) # The dimension of the embbeding space for cparams
+    parser.add_argument("--provide_filter", type=int, choices=[0, 1], default=0) # Whether provide transformed filters
     args = parser.parse_args()
     cfg.update(**{k:v for k,v in vars(args).items() if v is not None})
     
-    cfg.run_name = f'blocks{cfg.blocks}_layers{cfg.layers}_lr{cfg.lr}_hidden{cfg.hidden_dim}_img{cfg.img_dim}_merge_dim{cfg.merge_dim}_img_dim{cfg.img_dim}_' + datetime.now().strftime("run_%m%d_%H_%M")
-
+    cfg.run_name = f'blocks{cfg.blocks}_layers{cfg.layers}_img{cfg.img_dim}_filter{cfg.provide_filter}_emb_dim{cfg.emb_dim}_img_dim{cfg.img_dim}_' + \
+            datetime.now().strftime("run_%m%d_%H_%M")
     cfg.save_dir = f"{cfg.root_dir}/checkpoints/{cfg.name}_checkpoints/{cfg.run_name}/"
     os.makedirs(cfg.save_dir, exist_ok=True)
     
@@ -329,12 +354,11 @@ if __name__ == "__main__":
         log_model=True,
         dir="$PROJECT/"
     )
-    
     torch.set_float32_matmul_precision('medium')
     cfg.in_dim = cfg.img_dim**2
     cfg.out_hw = cnn_dim_out(cfg.img_dim, cfg.kernel_size, cfg.stride, 0)
     cfg.out_dim = cfg.out_hw**2
-    model = fakeGCNN(cfg)
+    model = fakeCNN(cfg)
     
     train_data, test_data = prepare_dataset()
     fabric = L.Fabric(accelerator="cuda", loggers=[logger])
@@ -362,8 +386,8 @@ if __name__ == "__main__":
             optimizer.step()
             optimizer.zero_grad()
         if iteration % 500 == 0: # for visualization
-            fig = model.visualization(test_data)
-            fig.savefig(cfg.save_dir+f"visualization_{iteration}.png")
+        #     fig = model.visualization(test_data)
+        #     fig.savefig(cfg.save_dir+f"visualization_{iteration}.png")
             state = { "model": model, "optimizer": optimizer }
             fabric.save(cfg.save_dir+f"checkpoint_{iteration}.ckpt", state)
 

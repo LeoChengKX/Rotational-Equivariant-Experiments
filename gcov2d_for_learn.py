@@ -23,7 +23,7 @@ def trans_filter(w, inds):
 
 class SplitGConv2D(nn.Module):
 
-    def __init__(self, weights, kernel_size=3, stride=1, padding=0, bias=False, input_stabilizer_size=1, output_stabilizer_size=4):
+    def __init__(self, kernel_size=3, stride=1, padding=0, bias=False, input_stabilizer_size=1, output_stabilizer_size=4, weight=None):
         super(SplitGConv2D, self).__init__()
         assert (input_stabilizer_size, output_stabilizer_size) in make_indices_functions.keys()
         self.ksize = kernel_size
@@ -41,10 +41,13 @@ class SplitGConv2D(nn.Module):
         self.input_stabilizer_size = input_stabilizer_size
         self.output_stabilizer_size = output_stabilizer_size
 
-        self.weight = weights  # (out_ch, in_ch, input_stablizer_size, ks, ks)
-        
+        if weight is None:
+            self.weight = torch.rand((1, 1, input_stabilizer_size, 3, 3)).cuda()  # (out_ch, in_ch, input_stablizer_size, ks, ks) hardcoded
+        else:
+            self.weight = weight.reshape((1, 1, input_stabilizer_size, 3, 3))
+
         if bias:
-            self.bias = Parameter(torch.Tensor(self.out_channels))
+            self.bias = Parameter(torch.Tensor(self.out_channels)).cuda()
         else:
             self.register_parameter('bias', None)
         self.reset_parameters()
@@ -75,11 +78,11 @@ class SplitGConv2D(nn.Module):
         y = F.conv2d(input, weight=tw, bias=None, stride=self.stride,
                         padding=self.padding)
         batch_size, _, ny_out, nx_out = y.size()
-        y = y.view(batch_size, self.out_channels, self.output_stabilizer_size, ny_out, nx_out)
+        # y = y.view(batch_size, self.out_channels, self.output_stabilizer_size, ny_out, nx_out)
 
-        if self.bias is not None:
-            bias = self.bias.view(1, self.out_channels, 1, 1, 1)
-            y = y + bias
+        # if self.bias is not None:
+        #     bias = self.bias.view(1, self.out_channels, 1, 1, 1)
+        #     y = y + bias
 
         return y
 

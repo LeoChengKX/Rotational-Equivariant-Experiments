@@ -1,3 +1,6 @@
+"""
+Learn P4ConvZ2 composed with P4ConvP4 directly. 
+"""
 import os
 os.environ["WANDB_API_KEY"] = '05f974a64215c03b7fc204d65f79b91c1bb3e369'
 
@@ -19,7 +22,7 @@ from matplotlib import pyplot as plt
 from gcov2d_for_learn import *
 
 cfg = ConfigDict()
-cfg.name = 'mlp2gcnn'
+cfg.name = 'mlp2gcnn_P4P4'
 cfg.root_dir = "/project/a/aspuru/chengl43/rot_equiv_exp"
 cfg.log_dir = f"{cfg.root_dir}/logs/"
 # cfg.seed = 42 
@@ -107,21 +110,20 @@ class MLP(nn.Module):
         self.act_fn = SmoothStep(cfg.ss_gamma)
         for _ in range(blocks):
             self.MLP_blocks.append(MLP_block(in_dim, block_out_dim, hidden_dim, layers))
-        self.mtx1 = nn.Parameter(torch.rand(cfg.kernel_size ** 2, self.merge_dim)) # Projection to embbeding space
-        self.mtx2 = nn.Parameter(torch.rand(cfg.kernel_size ** 2 * self.merge_dim, self.blocks)) # Projection back to normal space
+        self.mtx1 = nn.Parameter(torch.rand(5 * cfg.kernel_size ** 2, self.merge_dim)) # Projection to embbeding space
+        self.mtx2 = nn.Parameter(torch.rand(5 * cfg.kernel_size ** 2 * self.merge_dim, self.blocks)) # Projection back to normal space
 
     def forward(self, img, cparams):
         img = img.flatten(start_dim=1)
         cparams = cparams.flatten()
         ks = cparams.shape[-1]
-        # if cfg.activation == 0:
-        #     MLP_result = [self.MLP_blocks[i](img) for i in range(self.blocks)]
-        # else:
-        #     MLP_result = [self.act_fn(self.MLP_blocks[i](img)) for i in range(self.blocks)]
-        # result = []
-        MLP_result = [self.MLP_blocks[i](img) for i in range(self.blocks)]
+        if cfg.activation == 0:
+            MLP_result = [self.MLP_blocks[i](img) for i in range(self.blocks)]
+        else:
+            MLP_result = [self.act_fn(self.MLP_blocks[i](img)) for i in range(self.blocks)]
+        result = []
 
-        h = cparams.view(cfg.kernel_size ** 2, 1) * self.mtx1 # Same shape as mtx1
+        h = cparams.view(5 * cfg.kernel_size ** 2, 1) * self.mtx1 # Same shape as mtx1
         h = h.flatten()
         h = h @ self.mtx2 # self.blocks x 1
         result = [MLP_result[i] * h[i] for i in range(len(MLP_result))]
@@ -162,7 +164,7 @@ class MLP_block(nn.Module):
                 x = layer(x)
             return x
 
-class fakeGCNN(nn.Module):
+class fakeCNN(nn.Module):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
@@ -171,18 +173,22 @@ class fakeGCNN(nn.Module):
         self.loss_rc = nn.MSELoss()
         self.loss_kl = nn.KLDivLoss(reduction="batchmean", log_target=True)
         self.cparams_transform = nn.ParameterList([
-            nn.Parameter(torch.rand(cfg.kernel_size ** 2, cfg.kernel_size ** 2)).cuda() for _ in range(4)])
+            nn.Parameter(torch.rand(5 * cfg.kernel_size ** 2, 5 * cfg.kernel_size ** 2)).cuda() for _ in range(16)])
 
     def train_step(self, dataloader):
         ks = self.cfg.kernel_size
         img_dim = self.cfg.img_dim
         
         loss = 0
-        conv = P4ConvZ2()
+        conv1 = P4ConvZ2()
+        conv2 = P4ConvP4()
         conv_bs = 128
         for _ in range(conv_bs):
-            cparams = torch.randn(ks**2).cuda()
-            conv.weight = nn.Parameter(cparams.view(1,1,1,ks,ks), requires_grad=False) # cnn weight
+            cparams1 = torch.randn(ks**2).cuda()
+            cparams2 = torch.randn(ks**2 * 4).cuda()
+            cparams = torch.cat((cparams1, cparams2)).cuda()
+            conv1.weight = nn.Parameter(cparams1.view(1,1,1,ks,ks), requires_grad=False) # cnn weight
+            conv2.weight = nn.Parameter(cparams2.view(1,1,4,ks,ks), requires_grad=False)
 
             if cfg.dataset == 0:
                 img_bs = cfg.bs
@@ -191,13 +197,16 @@ class fakeGCNN(nn.Module):
                 img, _ = next(iter(dataloader))
                 img = torch.Tensor(img).cuda()
             
-            cnn_out = conv(img)  # bs, 4, cnn_out_dim, cnn_out_dim
+            cnn_out = conv1(img)  # bs, 4, cnn_out_dim, cnn_out_dim
+            cnn_out = conv2(cnn_out)
 
-            # Architecture
             mlp_out = []
             for i in range(4):
-                cp = self.cparams_transform[i] @ cparams
-                mlp_out.append(self.model(img.view(cfg.bs,-1), cp))
+                outs = []
+                for j in range(4):
+                    cp = self.cparams_transform[i * 4 + j] @ cparams
+                    outs.append(self.model(img.view(cfg.bs,-1), cp))
+                mlp_out.append(sum(outs))
             mlp_out = torch.stack(mlp_out).transpose(0, 1)
             
             if cfg.loss_type == 0: # kl loss
@@ -221,7 +230,8 @@ class fakeGCNN(nn.Module):
         stride = self.cfg.stride
         
         # Conv Output
-        conv = P4ConvZ2()
+        conv1 = P4ConvZ2()
+        conv2 = P4ConvP4()
         cparams = torch.randn(ks**2).cuda()
         conv.weight = nn.Parameter(cparams.reshape(1,1,1,ks,ks),requires_grad=False) # cnn weight
 
@@ -236,7 +246,7 @@ class fakeGCNN(nn.Module):
         # MLP Output
         reshape_size = cnn_dim_out(img_dim, ks, stride, 0)
         cp = self.cparams_transform[0] @ cparams
-        mlp_out = self.model(img.view(1,-1), cp).detach().cpu().numpy().reshape(reshape_size,reshape_size)
+        mlp_out = self.model(img.view(1,-1), cparams).detach().cpu().numpy().reshape(reshape_size,reshape_size)
 
         vmin = min(cnn_out.min(), mlp_out.min())
         vmax = max(cnn_out.max(), mlp_out.max())
@@ -248,54 +258,6 @@ class fakeGCNN(nn.Module):
 
         plt.subplots_adjust(left=0.05, right=0.8, wspace=0.2)
         return f
-    
-    def result_visualization(self, img, cparams):
-        ks = self.cfg.kernel_size
-        img_dim = self.cfg.img_dim
-        stride = self.cfg.stride
-        
-        # Conv Output
-        conv = P4ConvZ2()
-        conv.weight = nn.Parameter(cparams.reshape(1,1,1,ks,ks),requires_grad=False) # cnn weight
-            
-        cnn_out = conv(img).squeeze().detach().cpu().numpy()
-
-        # MLP Output
-        reshape_size = cnn_dim_out(img_dim, ks, stride, 0)
-        mlp_out = []
-        for i in range(4):
-            cp = self.cparams_transform[i] @ cparams
-            mlp_out.append(self.model(img.view(1,-1), cp))
-        mlp_out = torch.stack(mlp_out)
-        vmin = min(cnn_out.min(), mlp_out.min())
-        vmax = max(cnn_out.max(), mlp_out.max())
-
-        f, axarr = plt.subplots(2,4, figsize=(16, 8))
-        for i in range(4):
-            axarr[0, i].imshow(cnn_out[i], vmin=vmin, vmax=vmax, cmap='gray')
-            axarr[0, i].axis(False)
-        
-        for i in range(4):
-            axarr[1, i].imshow(mlp_out[i].reshape(reshape_size, reshape_size).detach().cpu().numpy(), vmin=vmin, vmax=vmax, cmap='gray')
-            axarr[1, i].axis(False)
-
-        plt.subplots_adjust(left=0.05, right=0.8, wspace=0.2)
-        return f
-    
-    def forward(self, img, cparams):
-        """Used for visualization solely. """
-        ks = self.cfg.kernel_size
-        img_dim = self.cfg.img_dim
-        stride = self.cfg.stride
-        reshape_size = cnn_dim_out(img_dim, ks, stride, 0)
-
-        mlp_out = []
-        for i in range(4):
-            cp = self.cparams_transform[i] @ cparams
-            mlp_out.append(self.model(img.view(img.shape[0],-1), cp).reshape(img.shape[0], reshape_size, reshape_size))
-        mlp_out = torch.stack(mlp_out).transpose(0, 1)
-        return mlp_out
-
 
 if __name__ == "__main__":
     import argparse
@@ -309,19 +271,16 @@ if __name__ == "__main__":
     parser.add_argument("--layers", type=int, default=1)
     parser.add_argument("--dataset", type=int, default=0) # 0 or 1
     parser.add_argument("--hidden_dim", type=int, default=64) # Hidden dimension
-    parser.add_argument("--block_output_dim", type=int, default=64) # MLP Block out dimension
+    parser.add_argument("--block_output_dim", type=int, default=36) # MLP Block out dimension
     parser.add_argument("--img_dim", type=int, default=10)
     parser.add_argument("--merge_dim", type=int, default=10) # determine the dimension of the embbeding space
     args = parser.parse_args()
     cfg.update(**{k:v for k,v in vars(args).items() if v is not None})
     
-    cfg.run_name = f'blocks{cfg.blocks}_layers{cfg.layers}_lr{cfg.lr}_hidden{cfg.hidden_dim}_img{cfg.img_dim}_merge_dim{cfg.merge_dim}_img_dim{cfg.img_dim}_' + datetime.now().strftime("run_%m%d_%H_%M")
-
+    cfg.run_name = f'blocks{cfg.blocks}_layers{cfg.layers}_lr{cfg.lr}_hidden{cfg.hidden_dim}_img{cfg.img_dim}_merge_dim{cfg.merge_dim}_'+datetime.now().strftime("run_%m%d_%H_%M")
     cfg.save_dir = f"{cfg.root_dir}/checkpoints/{cfg.name}_checkpoints/{cfg.run_name}/"
     os.makedirs(cfg.save_dir, exist_ok=True)
     
-    cfg.block_output_dim = cnn_dim_out(cfg.img_dim, 3, 1, 0) ** 2 # Force output dim same as cnn output 
-
     logger = WandbLogger(
         save_dir=cfg.log_dir, 
         project=cfg.name, 
@@ -334,7 +293,7 @@ if __name__ == "__main__":
     cfg.in_dim = cfg.img_dim**2
     cfg.out_hw = cnn_dim_out(cfg.img_dim, cfg.kernel_size, cfg.stride, 0)
     cfg.out_dim = cfg.out_hw**2
-    model = fakeGCNN(cfg)
+    model = fakeCNN(cfg)
     
     train_data, test_data = prepare_dataset()
     fabric = L.Fabric(accelerator="cuda", loggers=[logger])
@@ -361,14 +320,14 @@ if __name__ == "__main__":
         if not is_accumulating:
             optimizer.step()
             optimizer.zero_grad()
-        if iteration % 500 == 0: # for visualization
-            fig = model.visualization(test_data)
-            fig.savefig(cfg.save_dir+f"visualization_{iteration}.png")
-            state = { "model": model, "optimizer": optimizer }
-            fabric.save(cfg.save_dir+f"checkpoint_{iteration}.ckpt", state)
+        # if iteration % 500 == 0: # for visualization
+        #     fig = model.visualization(test_data)
+        #     fig.savefig(cfg.save_dir+f"visualization_{iteration}.png")
+        #     state = { "model": model, "optimizer": optimizer }
+        #     fabric.save(cfg.save_dir+f"checkpoint_{iteration}.ckpt", state)
 
-    fig = model.visualization(test_data)
-    fig.savefig(cfg.save_dir+"visualization.png")
-    wandb.log({"visualization": fig})
+    # fig = model.visualization(test_data)
+    # fig.savefig(cfg.save_dir+"visualization.png")
+    # wandb.log({"visualization": fig})
     state = { "model": model, "optimizer": optimizer }
     fabric.save(cfg.save_dir+f"checkpoint.ckpt", state)
