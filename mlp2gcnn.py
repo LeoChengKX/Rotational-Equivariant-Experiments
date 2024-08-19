@@ -317,7 +317,8 @@ if __name__ == "__main__":
     
     cfg.run_name = f'blocks{cfg.blocks}_layers{cfg.layers}_lr{cfg.lr}_hidden{cfg.hidden_dim}_img{cfg.img_dim}_merge_dim{cfg.merge_dim}_img_dim{cfg.img_dim}_' + datetime.now().strftime("run_%m%d_%H_%M")
 
-    cfg.save_dir = f"{cfg.root_dir}/checkpoints/{cfg.name}_checkpoints/{cfg.run_name}/"
+    # cfg.save_dir = f"{cfg.root_dir}/checkpoints/{cfg.name}_checkpoints/{cfg.run_name}/"
+    cfg.save_dir = f"{cfg.root_dir}/histograms/blocks{cfg.blocks}/"
     os.makedirs(cfg.save_dir, exist_ok=True)
     
     cfg.block_output_dim = cnn_dim_out(cfg.img_dim, 3, 1, 0) ** 2 # Force output dim same as cnn output 
@@ -356,6 +357,8 @@ if __name__ == "__main__":
         loss = model.train_step(train_data)
         if iteration % 100 == 0:
             fabric.log_dict({"train/loss": loss})
+            state = { "model": model, "optimizer": optimizer }
+            fabric.save(cfg.save_dir+f"checkpoint_{iteration}.ckpt", state)
         fabric.backward(loss)
         fabric.clip_gradients(model, optimizer, max_norm=cfg.grad_norm_clip)
         if not is_accumulating:
@@ -364,8 +367,8 @@ if __name__ == "__main__":
         if iteration % 500 == 0: # for visualization
             fig = model.visualization(test_data)
             fig.savefig(cfg.save_dir+f"visualization_{iteration}.png")
-            state = { "model": model, "optimizer": optimizer }
-            fabric.save(cfg.save_dir+f"checkpoint_{iteration}.ckpt", state)
+            # state = { "model": model, "optimizer": optimizer }
+            # fabric.save(cfg.save_dir+f"checkpoint_{iteration}.ckpt", state)
 
     fig = model.visualization(test_data)
     fig.savefig(cfg.save_dir+"visualization.png")

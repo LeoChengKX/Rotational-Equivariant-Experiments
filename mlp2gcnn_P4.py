@@ -290,15 +290,16 @@ class fakeCNN(nn.Module):
         """Used for visualization solely. """
         ks = 3
         if self.cfg.provide_filter == 0:
+            cp = []
+            for i in range(16): 
+                cp.append(torch.sum(torch.einsum("bij,bj->bi", self.cparams_transform[i], cparams.view(4, ks ** 2)), axis=0))
+            cp = torch.stack(cp).view(4, 4, ks ** 2)
             mlp_out = []
             for i in range(4):
-                cp = cparams.view(4, ks ** 2)[i].view(ks ** 2, 1) * self.cparams_mtx_up
-                cp = cp.flatten()
-                cp = cp @ self.cparams_mtxs_down[i]
                 layer_out = []
                 for j in range(4):
                     img_in = img.transpose(0, 1)[j].view(1, -1)
-                    layer_out.append(self.model(img_in, cp))
+                    layer_out.append(self.model(img_in, cp[i][j]))
                 mlp_out.append(sum(layer_out))
             mlp_out = torch.stack(mlp_out).transpose(0, 1)
         
